@@ -1,0 +1,144 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Print Authentication Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { display: flex; flex-direction: column; gap: 20px; }
+        .section { border: 1px solid #ccc; padding: 20px; border-radius: 5px; }
+        button { padding: 10px; margin: 5px; }
+        #mfccPlot { max-width: 100%; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="section">
+            <h2>Voice Print Authentication Demo</h2>
+            <p>This demo showcases voice print authentication using MFCC (Mel-frequency cepstral coefficients) and Random Forest machine learning.</p>
+        </div>
+        
+        <div class="section">
+            <h3>Register User</h3>
+            <input type="text" id="userId" placeholder="Enter User ID">
+            <button onclick="startRecording('register')">Record Voice</button>
+            <button onclick="stopRecording('register')" disabled>Stop Recording</button>
+        </div>
+        
+        <div class="section">
+            <h3>Authenticate User</h3>
+            <button onclick="startRecording('authenticate')">Record Voice</button>
+            <button onclick="stopRecording('authenticate')" disabled>Stop Recording</button>
+        </div>
+        
+        <div class="section">
+            <h3>Results</h3>
+            <div id="result"></div>
+            <h4>MFCC Visualization</h4>
+            <img id="mfccPlot" src="" alt="MFCC Plot">
+            <h4>Technical Explanation</h4>
+            <p id="explanation">
+                MFCC (Mel-frequency cepstral coefficients) are features extracted from audio that represent the short-term power spectrum of sound. 
+                The system:
+                1. Extracts 13 MFCC coefficients from the audio input
+                2. Uses a Random Forest Classifier to match voice prints
+                3. Returns confidence scores for authentication
+                Common failure reasons:
+                - Background noise interference
+                - Insufficient audio quality
+                - Similar voice patterns among users
+                Improvements:
+                - Record in a quiet environment
+                - Use high-quality microphone
+                - Speak clearly and consistently
+            </p>
+        </div>
+    </div>
+
+    <script>
+        let mediaRecorder;
+        let audioChunks = [];
+        
+        async function startRecording(action) {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream);
+            audioChunks = [];
+            
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+            mediaRecorder.start();
+            
+            document.querySelector(`button[onclick="startRecording('${action}')"]`).disabled = true;
+            document.querySelector(`button[onclick="stopRecording('${action}')"]`).disabled = false;
+        }
+        
+        async function stopRecording(action) {
+            mediaRecorder.stop();
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = async () => {
+                    const base64Audio = reader.result;
+                    const data = action === 'register' ? {
+                        user_id: document.getElementById('userId').value,
+                        audio: base64Audio
+                    } : { audio: base64Audio };
+                    
+                    const response = await fetch(`http://localhost:5000/${action}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+                    const result = await response.json();
+                    
+                    document.getElementById('result').innerHTML = JSON.stringify(result, null, 2);
+                    if (result.mfcc_plot) {
+                        document.getElementById('mfccPlot').src = `data:image/png;base64,${result.mfcc_plot}`;
+                    }
+                    
+                    document.querySelector(`button[onclick="startRecording('${action}')"]`).disabled = false;
+                    document.querySelector(`button[onclick="stopRecording('${action}')"]`).disabled = true;
+                };
+            };
+        }
+    </script>
+</body>
+</html>
