@@ -1,0 +1,277 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Authentication Demo with MFCC and ML (Localhost)</title>
+  <script src="https://cdn.jsdelivr.net/npm/meyda@5.2.0/dist/web/meyda.min.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      padding: 20px;
+      background-color: #f0f0f0;
+    }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 5px;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    #status {
+      margin: 20px;
+      font-size: 18px;
+      color: #333;
+    }
+    #result {
+      margin: 20px;
+      font-size: 20px;
+      font-weight: bold;
+    }
+    #error {
+      color: red;
+      margin: 10px;
+    }
+    #instructions {
+      margin: 20px;
+      font-size: 16px;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <h1>Voice Authentication Demo (MFCC + ML)</h1>
+  <div id="instructions">
+    <p><strong>Setup Instructions:</strong></p>
+    <p>1. Run a local server: In the terminal, navigate to this file's directory and run <code>python -m http.server 8000</code>.</p>
+    <p>2. Open <a href="http://localhost:8000/voice_auth_mfcc_demo_fixed_local.html">http://localhost:8000/voice_auth_mfcc_demo_fixed_local.html</a> in Chrome or Firefox.</p>
+    <p>3. Allow microphone access when prompted. If denied, enable it in browser settings (Chrome: Settings > Privacy and security > Site settings > Microphone).</p>
+    <p>4. Check the browser console (F12) for debugging logs if the demo gets stuck.</p>
+  </div>
+  <p>Step 1: Register your voice by recording a sample.</p>
+  <button id="registerBtn">Register Voice</button>
+  <p>Step 2: Authenticate by recording another sample.</p>
+  <button id="authBtn" disabled>Authenticate Voice</button>
+  <div id="status">Press "Register Voice" to start.</div>
+  <div id="result"></div>
+  <div id="error"></div>
+
+  <script>
+    let registeredVoicePrint = null;
+    let isRecording = false;
+    let mediaRecorder = null;
+    let audioContext = null;
+    let stream = null;
+
+    const registerBtn = document.getElementById('registerBtn');
+    const authBtn = document.getElementById('authBtn');
+    const status = document.getElementById('status');
+    const result = document.getElementById('result');
+    const error = document.getElementById('error');
+
+    // Clean up media stream
+    function cleanupStream() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+      if (audioContext) {
+        audioContext.close().catch(err => console.error('Error closing audio context:', err));
+        audioContext = null;
+      }
+    }
+
+    // Initialize Web Audio API and Meyda
+    async function initAudio() {
+      try {
+        console.log('Initializing audio...');
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const source = audioContext.createMediaStreamSource(stream);
+        const meyda = Meyda.createMeydaAnalyzer({
+          audioContext: audioContext,
+          source: source,
+          bufferSize: 512,
+          featureExtractors: ['mfcc'],
+          callback: () => {}
+        });
+        console.log('Audio initialized successfully');
+        return { source, meyda };
+      } catch (err) {
+        console.error('Audio initialization error:', err);
+        if (err.name === 'NotAllowedError') {
+          error.textContent = 'Microphone permission denied. Please enable microphone access in your browser settings (e.g., Chrome: Settings > Privacy and security > Site settings > Microphone) and reload the page.';
+        } else if (err.name === 'NotFoundError') {
+          error.textContent = 'No microphone found. Please connect a microphone and try again.';
+        } else {
+          error.textContent = `Error initializing audio: ${err.message}`;
+        }
+        cleanupStream();
+        throw err;
+      }
+    }
+
+    // Extract MFCC features from audio
+    async function extractMFCCs(type) {
+      try {
+        console.log(`Starting ${type} recording...`);
+        const { source, meyda } = await initAudio();
+        const mfccList = [];
+        isRecording = true;
+
+        status.textContent = `Recording ${type}... Speak for 5 seconds.`;
+        error.textContent = '';
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        mediaRecorder.start();
+        console.log(`${type} recording started`);
+
+        const interval = setInterval(() => {
+          const mfcc = meyda.get('mfcc');
+          if (mfcc) {
+            mfccList.push(mfcc.slice(0, 13)); // Use first 13 MFCC coefficients
+            console.log(`MFCC extracted for ${type}:`, mfcc.slice(0, 13));
+          } else {
+            console.warn(`No MFCC data for ${type} at this frame`);
+          }
+        }, 100);
+
+        setTimeout(() => {
+          if (isRecording) {
+            console.log(`Forcing ${type} recording stop`);
+            mediaRecorder.stop();
+            isRecording = false;
+            clearInterval(interval);
+          }
+        }, 5000);
+
+        return new Promise((resolve) => {
+          mediaRecorder.onstop = () => {
+            console.log(`${type} recording stopped, processing MFCCs...`);
+            cleanupStream();
+            source.disconnect();
+            if (mfccList.length === 0) {
+              console.error('No MFCCs extracted for', type);
+              status.textContent = `Error: No MFCCs extracted for ${type}.`;
+              error.textContent = 'Failed to extract voice features. Please try again.';
+              resolve(null);
+              return;
+            }
+            // Average MFCCs to create a single feature vector
+            const avgMFCC = mfccList[0].map((_, i) =>
+              mfccList.reduce((sum, frame) => sum + frame[i], 0) / mfccList.length
+            );
+            console.log(`${type} MFCC vector:`, avgMFCC);
+            resolve(avgMFCC);
+          };
+          mediaRecorder.onerror = (e) => {
+            console.error(`MediaRecorder error for ${type}:`, e);
+            cleanupStream();
+            status.textContent = `Error during ${type} recording.`;
+            error.textContent = 'Recording failed. Please try again.';
+            resolve(null);
+          };
+        });
+      } catch (err) {
+        console.error(`Error in extractMFCCs for ${type}:`, err);
+        status.textContent = `Failed to process ${type} recording.`;
+        return null;
+      }
+    }
+
+    // Simple k-NN (k=1) classifier using Euclidean distance
+    function knnClassify(registered, test) {
+      if (!registered || !test) {
+        console.error('Invalid voice prints for k-NN:', { registered, test });
+        return false;
+      }
+      const distance = Math.sqrt(
+        registered.reduce((sum, val, i) => sum + Math.pow(val - test[i], 2), 0)
+      );
+      console.log('k-NN distance:', distance);
+      const threshold = 10; // Adjust threshold for demo purposes
+      return distance < threshold;
+    }
+
+    // Record and process voice for registration
+    registerBtn.addEventListener('click', async () => {
+      error.textContent = '';
+      result.textContent = '';
+      status.textContent = 'Preparing to register...';
+      registeredVoicePrint = await extractMFCCs('register');
+      if (registeredVoicePrint) {
+        status.textContent = 'Voice registered! Now authenticate.';
+        authBtn.disabled = false;
+        registerBtn.disabled = true;
+      } else {
+        status.textContent = 'Failed to register voice. Try again.';
+      }
+    });
+
+    // Record and process voice for authentication
+    authBtn.addEventListener('click', async () => {
+      error.textContent = '';
+      result.textContent = '';
+      status.textContent = 'Preparing to authenticate ..
+
+.';
+      const testVoicePrint = await extractMFCCs('authenticate');
+      if (testVoicePrint && registeredVoicePrint) {
+        const isMatch = knnClassify(registeredVoicePrint, testVoicePrint);
+        result.textContent = isMatch ? 'Authentication Successful!' : 'Authentication Failed!';
+        status.textContent = 'Press "Register Voice" to try again.';
+        registerBtn.disabled = false;
+        authBtn.disabled = true;
+      } else {
+        status.textContent = 'Failed to authenticate. Try again.';
+      }
+    });
+  </script>
+</body>
+</html>
